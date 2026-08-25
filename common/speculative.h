@@ -12,7 +12,7 @@ struct common_speculative_token_dist {
 
 void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & dist, float p_min);
 
-bool common_speculative_needs_checkpoint(common_context_seq_rm_type seq_rm_type, uint32_t n_rs_seq, size_t n_draft);
+bool common_speculative_needs_checkpoint(common_context_seq_rm_type seq_rm_type, uint32_t n_rs_seq, size_t n_mutated);
 
 bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_type,
                                               uint32_t                   n_rs_seq,
@@ -42,6 +42,9 @@ std::string common_speculative_type_to_str(enum common_speculative_type type);
 
 // return the max number of draft tokens based on the speculative parameters
 int32_t common_speculative_n_max(const common_params_speculative * spec);
+
+// return the maximum number of draft-context positions that draft-model processing can mutate
+size_t common_speculative_draft_max_mutation_span(const common_params_speculative * spec);
 
 common_params common_base_params_to_speculative(const common_params & params);
 

@@ -304,6 +304,31 @@ static void test_speculative_checkpoint_selection() {
     GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_NO, 0, 8));
 }
 
+static void test_speculative_draft_max_mutation_span() {
+    common_params_speculative params;
+    params.draft.n_max = 7;
+
+    params.types = { COMMON_SPECULATIVE_TYPE_NONE };
+    GGML_ASSERT(common_speculative_draft_max_mutation_span(&params) == 0);
+
+    params.types = { COMMON_SPECULATIVE_TYPE_NGRAM_CACHE };
+    GGML_ASSERT(common_speculative_draft_max_mutation_span(&params) == 0);
+
+    // Draft-model processing can mutate the anchor plus every configured proposal position.
+    // This maximum is independent of how many proposals survive p_min/n_min or per-call truncation.
+    params.types                             = { COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH };
+    constexpr size_t n_returned_after_filter = 0;
+    GGML_ASSERT(common_speculative_draft_max_mutation_span(&params) == 8);
+    GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 7, n_returned_after_filter));
+    GGML_ASSERT(common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 7,
+                                                    common_speculative_draft_max_mutation_span(&params)));
+    GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 8,
+                                                     common_speculative_draft_max_mutation_span(&params)));
+
+    params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE, COMMON_SPECULATIVE_TYPE_NGRAM_MOD };
+    GGML_ASSERT(common_speculative_draft_max_mutation_span(&params) == 8);
+}
+
 static void test_dist_singleton_rng() {
     llama_sampler * singleton = llama_sampler_init_dist(4242);
     llama_sampler * control   = llama_sampler_init_dist(4242);
@@ -576,6 +601,7 @@ int main(void) {
     test_stochastic_verification_selection_gate();
     test_stochastic_verification_rejects_future_conditioned_markov_draft();
     test_speculative_checkpoint_selection();
+    test_speculative_draft_max_mutation_span();
 
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.1f, 0.2f, 0.3f, 0.4f}, 1.0f);
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f);

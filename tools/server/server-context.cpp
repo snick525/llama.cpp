@@ -2907,7 +2907,10 @@ private:
                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
 
                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-                const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                const bool use_ckpt_dft =
+                    ctx_dft && common_speculative_needs_checkpoint(
+                                   ctx_dft_seq_rm_type, llama_n_rs_seq(ctx_dft),
+                                   common_speculative_draft_max_mutation_span(&params_base.speculative));
 
                 const int n_draft_max = slot.get_n_draft_max();
 
@@ -2966,7 +2969,10 @@ private:
             slot.stats.n_draft_tokens += draft.size();
 
             // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
-            const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+            const bool use_ckpt_dft =
+                ctx_dft && common_speculative_needs_checkpoint(
+                               ctx_dft_seq_rm_type, llama_n_rs_seq(ctx_dft),
+                               common_speculative_draft_max_mutation_span(&params_base.speculative));
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
@@ -2982,9 +2988,6 @@ private:
                 const bool use_ckpt_tgt =
                     common_speculative_needs_checkpoint(ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), draft.size());
 
-                const bool use_ckpt_dft =
-                   (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx_dft));
-
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
 
@@ -2997,10 +3000,6 @@ private:
                             ckpt.pos_min, ckpt.pos_max, slot.prompt.n_tokens(),
                             (float) ckpt.size() / 1024 / 1024,
                             (float) ckpt.data_dft.size() / 1024 / 1024);
-                }
-
-                if (use_ckpt_dft) {
-                    ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
             }
         });

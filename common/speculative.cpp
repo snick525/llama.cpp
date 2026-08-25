@@ -40,9 +40,9 @@ void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & 
     }
 }
 
-bool common_speculative_needs_checkpoint(common_context_seq_rm_type seq_rm_type, uint32_t n_rs_seq, size_t n_draft) {
+bool common_speculative_needs_checkpoint(common_context_seq_rm_type seq_rm_type, uint32_t n_rs_seq, size_t n_mutated) {
     return seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-           (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_draft > n_rs_seq);
+           (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_mutated > n_rs_seq);
 }
 
 bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_type,
@@ -2464,6 +2464,33 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
     }
 
     return n_max;
+}
+
+size_t common_speculative_draft_max_mutation_span(const common_params_speculative * spec) {
+    const bool has_draft_impl = std::any_of(spec->types.begin(), spec->types.end(), [](common_speculative_type type) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE:
+            case COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3:
+            case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:
+            case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:
+            case COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK:
+                return true;
+            case COMMON_SPECULATIVE_TYPE_NONE:
+            case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE:
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K:
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MOD:
+            case COMMON_SPECULATIVE_TYPE_NGRAM_CACHE:
+            case COMMON_SPECULATIVE_TYPE_COUNT:
+                return false;
+        }
+
+        return false;
+    });
+
+    // Verification processes the anchor plus all returned proposals. DFlash can also decode
+    // that whole configured block before p_min/n_min filtering or per-call truncation.
+    return has_draft_impl ? (size_t) std::max(0, spec->draft.n_max) + 1 : 0;
 }
 
 common_params common_base_params_to_speculative(const common_params & params) {
