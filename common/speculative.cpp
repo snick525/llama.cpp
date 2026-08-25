@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cinttypes>
 #include <cstring>
 #include <iomanip>
@@ -30,6 +31,117 @@
 
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
 #define SPEC_VOCAB_CHECK_START_TOKEN_ID 5
+
+float common_speculative_dflash_normalized_entropy(const std::vector<float> & probs) {
+    if (probs.size() <= 1) {
+        return 0.0f;
+    }
+
+    float sum = 0.0f;
+    for (float p : probs) {
+        sum += p;
+    }
+    if (sum <= 0.0f) {
+        return 0.0f;
+    }
+
+    float entropy = 0.0f;
+    for (float p : probs) {
+        if (p > 0.0f) {
+            const float normalized = p / sum;
+            entropy -= normalized * std::log(normalized);
+        }
+    }
+    return entropy / std::log((float) probs.size());
+}
+
+bool common_speculative_dflash_use_greedy(
+        const std::vector<float> & probs,
+        float greedy_max_entropy) {
+    return greedy_max_entropy >= 0.0f &&
+            common_speculative_dflash_normalized_entropy(probs) <= greedy_max_entropy;
+}
+
+void common_speculative_dflash_select(
+        const float * lattice,
+        int32_t n_block_tokens,
+        int32_t n_embd,
+        int32_t selector_top_k,
+        float temperature,
+        float greedy_max_entropy,
+        float p_min,
+        int32_t n_min,
+        std::mt19937 & rng,
+        llama_tokens & result,
+        std::vector<common_speculative_token_dist> & dists) {
+    GGML_ASSERT(lattice);
+    GGML_ASSERT(temperature > 0.0f);
+    GGML_ASSERT(selector_top_k > 0);
+    GGML_ASSERT(n_embd >= selector_top_k * (selector_top_k + 1));
+    GGML_ASSERT(result.size() == dists.size());
+
+    int32_t predecessor = 0;
+    for (int32_t i = 1; i < n_block_tokens; ++i) {
+        const float * row = lattice + (size_t) i * n_embd;
+        const float * scores = row + selector_top_k + (size_t) predecessor * selector_top_k;
+
+        common_speculative_token_dist dist;
+        dist.ids.resize(selector_top_k);
+        dist.probs.resize(selector_top_k);
+        const float max_score = *std::max_element(scores, scores + selector_top_k);
+        float sum = 0.0f;
+        for (int32_t k = 0; k < selector_top_k; ++k) {
+            dist.ids[k] = (llama_token) row[k];
+            dist.probs[k] = std::exp((scores[k] - max_score) / temperature);
+            sum += dist.probs[k];
+        }
+        for (float & p : dist.probs) {
+            p /= sum;
+        }
+
+        const bool use_greedy = common_speculative_dflash_use_greedy(
+                dist.probs, greedy_max_entropy);
+        if (use_greedy) {
+            predecessor = (int32_t) std::distance(
+                    dist.probs.begin(), std::max_element(dist.probs.begin(), dist.probs.end()));
+        } else {
+            std::discrete_distribution<int32_t> sample(dist.probs.begin(), dist.probs.end());
+            predecessor = sample(rng);
+        }
+        if (dist.probs[predecessor] < p_min) {
+            break;
+        }
+
+        result.push_back(dist.ids[predecessor]);
+        if (use_greedy) {
+            dists.emplace_back().mode = COMMON_SPECULATIVE_PROPOSAL_GREEDY;
+        } else {
+            dists.push_back(std::move(dist));
+        }
+    }
+
+    if (result.size() < (size_t) n_min) {
+        result.clear();
+        dists.clear();
+    }
+
+    GGML_ASSERT(result.size() == dists.size());
+}
+
+void common_speculative_truncate_draft(
+        llama_tokens & result,
+        std::vector<common_speculative_token_dist> * dists,
+        int32_t n_max) {
+    if (n_max <= 0 || result.size() <= (size_t) n_max) {
+        return;
+    }
+
+    if (dists && !dists->empty()) {
+        GGML_ASSERT(dists->size() == result.size());
+        dists->resize(n_max);
+    }
+    result.resize(n_max);
+}
 
 const std::map<std::string, common_speculative_type> common_speculative_type_from_name_map = {
     {"none",          COMMON_SPECULATIVE_TYPE_NONE},
@@ -1275,33 +1387,25 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     selector_reset[seq_id] = false;
                 }
 
-                int32_t predecessor = 0;
-                for (int32_t i = 1; i < n_block_tokens; ++i) {
-                    const float * row = lattice + (size_t) (beg + i) * n_embd_dec;
-                    const float * scores = row + selector_top_k + (size_t) predecessor * selector_top_k;
+                if (dp.temperature > 0.0f) {
+                    common_speculative_dflash_select(
+                            lattice + (size_t) beg * n_embd_dec,
+                            n_block_tokens,
+                            n_embd_dec,
+                            selector_top_k,
+                            dp.temperature,
+                            params.dflash_greedy_max_entropy,
+                            params.p_min,
+                            params.n_min,
+                            selector_rng[seq_id],
+                            result,
+                            *dp.dists);
+                } else {
+                    int32_t predecessor = 0;
+                    for (int32_t i = 1; i < n_block_tokens; ++i) {
+                        const float * row = lattice + (size_t) (beg + i) * n_embd_dec;
+                        const float * scores = row + selector_top_k + (size_t) predecessor * selector_top_k;
 
-                    if (dp.temperature > 0.0f) {
-                        common_speculative_token_dist dist;
-                        dist.ids.resize(selector_top_k);
-                        dist.probs.resize(selector_top_k);
-                        const float max_score = *std::max_element(scores, scores + selector_top_k);
-                        float sum = 0.0f;
-                        for (int32_t k = 0; k < selector_top_k; ++k) {
-                            dist.ids[k] = (llama_token) row[k];
-                            dist.probs[k] = std::exp((scores[k] - max_score) / dp.temperature);
-                            sum += dist.probs[k];
-                        }
-                        for (float & p : dist.probs) {
-                            p /= sum;
-                        }
-                        std::discrete_distribution<int32_t> sample(dist.probs.begin(), dist.probs.end());
-                        predecessor = sample(selector_rng[seq_id]);
-                        if (dist.probs[predecessor] < params.p_min) {
-                            break;
-                        }
-                        result.push_back(dist.ids[predecessor]);
-                        dp.dists->push_back(std::move(dist));
-                    } else {
                         predecessor = (int32_t) std::distance(scores,
                                 std::max_element(scores, scores + selector_top_k));
                         if (params.p_min > 0.0f) {
@@ -2771,7 +2875,7 @@ void common_speculative_draft(common_speculative * spec) {
                 if (dp.n_max > 0) {
                     if (!result.empty() && (int) result.size() > dp.n_max) {
                         SPC_DBG("truncating draft to %d tokens\n", dp.n_max);
-                        result.resize(dp.n_max);
+                        common_speculative_truncate_draft(result, dp.dists, dp.n_max);
                     }
                 }
 

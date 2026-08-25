@@ -719,6 +719,58 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return result;
 }
 
+common_speculative_verify_result common_speculative_verify_token(
+        llama_token draft,
+        const common_speculative_token_dist & proposal,
+        llama_token fallback,
+        const llama_token_data_array * target,
+        std::mt19937 & rng) {
+    GGML_ASSERT(proposal.valid());
+
+    if (proposal.mode == COMMON_SPECULATIVE_PROPOSAL_GREEDY) {
+        GGML_ASSERT(target == nullptr);
+        return { fallback, fallback == draft };
+    }
+
+    GGML_ASSERT(target);
+    std::unordered_map<llama_token, float> q_probs;
+    q_probs.reserve(proposal.ids.size());
+    for (size_t i = 0; i < proposal.ids.size(); ++i) {
+        q_probs[proposal.ids[i]] += proposal.probs[i];
+    }
+    const auto q_prob = [&](llama_token id) {
+        const auto it = q_probs.find(id);
+        return it == q_probs.end() ? 0.0f : it->second;
+    };
+
+    float p_draft = 0.0f;
+    const float q_draft = q_prob(draft);
+    for (size_t i = 0; i < target->size; ++i) {
+        if (target->data[i].id == draft) {
+            p_draft = target->data[i].p;
+            break;
+        }
+    }
+
+    std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+    if (q_draft > 0.0f && uniform(rng) * q_draft <= p_draft) {
+        return { draft, true };
+    }
+
+    std::vector<float> residual(target->size);
+    float residual_sum = 0.0f;
+    for (size_t i = 0; i < target->size; ++i) {
+        residual[i] = std::max(0.0f, target->data[i].p - q_prob(target->data[i].id));
+        residual_sum += residual[i];
+    }
+
+    if (residual_sum > 0.0f) {
+        std::discrete_distribution<size_t> sample(residual.begin(), residual.end());
+        fallback = target->data[sample(rng)].id;
+    }
+    return { fallback, false };
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(
         struct common_sampler * gsmpl,
         struct llama_context * ctx,
@@ -732,55 +784,31 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(
     std::vector<llama_token> result;
     result.reserve(idxs.size());
 
-    std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
     size_t i = 0;
     for (; i < draft.size(); ++i) {
-        // Residual sampling needs the target distribution after every constraint.
-        const llama_token fallback = common_sampler_sample(gsmpl, ctx, idxs[i], true);
-        const auto & q = dists[i];
-        GGML_ASSERT(q.ids.size() == q.probs.size());
-
-        std::unordered_map<llama_token, float> q_probs;
-        q_probs.reserve(q.ids.size());
-        for (size_t j = 0; j < q.ids.size(); ++j) {
-            q_probs[q.ids[j]] += q.probs[j];
-        }
-        const auto q_prob = [&](llama_token id) {
-            const auto it = q_probs.find(id);
-            return it == q_probs.end() ? 0.0f : it->second;
-        };
-
-        auto * p = common_sampler_get_candidates(gsmpl, false);
-        float p_draft = 0.0f;
-        const float q_draft = q_prob(draft[i]);
-        for (size_t j = 0; j < p->size; ++j) {
-            if (p->data[j].id == draft[i]) {
-                p_draft = p->data[j].p;
-                break;
-            }
+        const auto & proposal = dists[i];
+        GGML_ASSERT(proposal.valid());
+        common_speculative_verify_result decision;
+        if (proposal.mode == COMMON_SPECULATIVE_PROPOSAL_GREEDY) {
+            const llama_token fallback = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
+            decision = common_speculative_verify_token(
+                    draft[i], proposal, fallback, nullptr, gsmpl->speculative_rng);
+        } else {
+            // Residual sampling needs the target distribution after every constraint.
+            const llama_token fallback = common_sampler_sample(gsmpl, ctx, idxs[i], true);
+            decision = common_speculative_verify_token(
+                    draft[i],
+                    proposal,
+                    fallback,
+                    common_sampler_get_candidates(gsmpl, false),
+                    gsmpl->speculative_rng);
         }
 
-        if (q_draft > 0.0f && uniform(gsmpl->speculative_rng) * q_draft <= p_draft) {
-            common_sampler_accept(gsmpl, draft[i], true);
-            result.push_back(draft[i]);
-            continue;
+        common_sampler_accept(gsmpl, decision.token, true);
+        result.push_back(decision.token);
+        if (!decision.accepted) {
+            break;
         }
-
-        std::vector<float> residual(p->size);
-        float residual_sum = 0.0f;
-        for (size_t j = 0; j < p->size; ++j) {
-            residual[j] = std::max(0.0f, p->data[j].p - q_prob(p->data[j].id));
-            residual_sum += residual[j];
-        }
-
-        llama_token id = fallback;
-        if (residual_sum > 0.0f) {
-            std::discrete_distribution<size_t> sample(residual.begin(), residual.end());
-            id = p->data[sample(gsmpl->speculative_rng)].id;
-        }
-        common_sampler_accept(gsmpl, id, true);
-        result.push_back(id);
-        break;
     }
 
     if (i == draft.size()) {

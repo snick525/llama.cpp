@@ -327,6 +327,7 @@ struct common_params_speculative_draft {
 
     float p_split = 0.1f; // speculative decoding split probability
     float p_min   = 0.0f; // minimum speculative decoding probability (greedy)
+    float dflash_greedy_max_entropy = -1.0f; // normalized entropy threshold (-1 = disabled)
 
     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
 
