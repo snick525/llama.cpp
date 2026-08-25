@@ -3,11 +3,43 @@
 #include "llama.h"
 #include "common.h"
 
+#include <cmath>
+#include <random>
+
 struct common_speculative;
+
+enum common_speculative_proposal_mode {
+    COMMON_SPECULATIVE_PROPOSAL_STOCHASTIC,
+    COMMON_SPECULATIVE_PROPOSAL_GREEDY,
+};
 
 struct common_speculative_token_dist {
     llama_tokens ids;
     std::vector<float> probs;
+    // Keep mode after the legacy aggregate fields so existing { ids, probs } initializers
+    // remain source-compatible and default to stochastic verification.
+    common_speculative_proposal_mode mode = COMMON_SPECULATIVE_PROPOSAL_STOCHASTIC;
+
+    bool valid() const {
+        switch (mode) {
+            case COMMON_SPECULATIVE_PROPOSAL_STOCHASTIC: {
+                if (ids.empty() || ids.size() != probs.size()) {
+                    return false;
+                }
+                float sum = 0.0f;
+                for (float p : probs) {
+                    if (!std::isfinite(p) || p < 0.0f) {
+                        return false;
+                    }
+                    sum += p;
+                }
+                return std::isfinite(sum) && sum > 0.0f;
+            }
+            case COMMON_SPECULATIVE_PROPOSAL_GREEDY:
+                return ids.empty() && probs.empty();
+        }
+        return false;
+    }
 };
 
 void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & dist, float p_min);
@@ -21,6 +53,27 @@ bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_
                                               float                      temperature,
                                               float                      p_min,
                                               int32_t                    n_min);
+
+float common_speculative_dflash_normalized_entropy(const std::vector<float> & probs);
+bool common_speculative_dflash_use_greedy(
+        const std::vector<float> & probs,
+        float greedy_max_entropy);
+void common_speculative_dflash_select(
+        const float * lattice,
+        int32_t n_block_tokens,
+        int32_t n_embd,
+        int32_t selector_top_k,
+        float temperature,
+        float greedy_max_entropy,
+        float p_min,
+        int32_t n_min,
+        std::mt19937 & rng,
+        llama_tokens & result,
+        std::vector<common_speculative_token_dist> & dists);
+void common_speculative_truncate_draft(
+        llama_tokens & result,
+        std::vector<common_speculative_token_dist> * dists,
+        int32_t n_max);
 
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);

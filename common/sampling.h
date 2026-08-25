@@ -102,6 +102,18 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 //
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first = false);
 
+struct common_speculative_verify_result {
+    llama_token token;
+    bool accepted;
+};
+
+common_speculative_verify_result common_speculative_verify_token(
+        llama_token draft,
+        const common_speculative_token_dist & proposal,
+        llama_token fallback,
+        const llama_token_data_array * target,
+        std::mt19937 & rng);
+
 // maximal-coupling verification for stochastic speculative decoding
 std::vector<llama_token> common_sampler_sample_and_accept_n(
         struct common_sampler * gsmpl,

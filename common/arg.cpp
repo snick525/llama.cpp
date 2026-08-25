@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cinttypes>
 #include <climits>
 #include <cmath>
@@ -4105,6 +4106,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.p_min = std::stof(value);
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
+
+    add_opt(common_arg(
+        {"--spec-draft-dflash-greedy-max-entropy"}, "E",
+        string_format("maximum normalized DFlash2 selector entropy for greedy proposals (-1 = disabled, default: %.2f)",
+                      (double) params.speculative.draft.dflash_greedy_max_entropy),
+        [](common_params & params, const std::string & value) {
+            if (value.empty() || std::any_of(value.begin(), value.end(),
+                    [](unsigned char c) { return std::isspace(c); })) {
+                throw std::invalid_argument("invalid value");
+            }
+            size_t pos = 0;
+            const float threshold = std::stof(value, &pos);
+            if (pos != value.size() ||
+                    !std::isfinite(threshold) ||
+                    (threshold != -1.0f && (threshold < 0.0f || threshold > 1.0f))) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.speculative.draft.dflash_greedy_max_entropy = threshold;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI})
+        .set_env("LLAMA_ARG_SPEC_DRAFT_DFLASH_GREEDY_MAX_ENTROPY"));
     add_opt(common_arg(
         {"--spec-draft-backend-sampling"},
         {"--no-spec-draft-backend-sampling"},

@@ -197,6 +197,30 @@ static void test(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SPECULATIVE));
     assert(params.speculative.draft.n_max == 123);
 
+    {
+        common_params entropy_params;
+        assert(entropy_params.speculative.draft.dflash_greedy_max_entropy == -1.0f);
+
+        argv = {"binary_name", "-m", "model.gguf", "--spec-draft-dflash-greedy-max-entropy", "0.2"};
+        assert(true == common_params_parse(
+                argv.size(), list_str_to_char(argv).data(), entropy_params, LLAMA_EXAMPLE_SPECULATIVE));
+        assert(std::fabs(entropy_params.speculative.draft.dflash_greedy_max_entropy - 0.2f) < 1e-6f);
+
+        common_params disabled_params;
+        argv = {"binary_name", "-m", "model.gguf", "--spec-draft-dflash-greedy-max-entropy", "-1"};
+        assert(true == common_params_parse(
+                argv.size(), list_str_to_char(argv).data(), disabled_params, LLAMA_EXAMPLE_SPECULATIVE));
+        assert(disabled_params.speculative.draft.dflash_greedy_max_entropy == -1.0f);
+
+        for (const char * value : {
+                "-2", "-0.5", "1.1", "nan", "inf", "-inf", "0.2junk", "0.2 ", " 0.2", ""}) {
+            common_params invalid_params;
+            argv = {"binary_name", "-m", "model.gguf", "--spec-draft-dflash-greedy-max-entropy", value};
+            assert(false == common_params_parse(
+                    argv.size(), list_str_to_char(argv).data(), invalid_params, LLAMA_EXAMPLE_SPECULATIVE));
+        }
+    }
+
     argv = {"binary_name", "-lm", "none"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_NONE);
