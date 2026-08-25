@@ -3822,13 +3822,14 @@ private:
                 common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
-                const bool can_rollback =
-                    ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
-                    (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_draft <= llama_n_rs_seq(ctx_tgt));
-                auto accepted = can_rollback && slot.task->params.sampling.temp > 0.0f &&
-                                slot.spec_dists.size() == slot.spec_draft.size()
-                    ? common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft, slot.spec_dists)
-                    : common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                auto accepted = common_speculative_can_verify_stochastic(
+                                    ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), n_draft, slot.spec_dists.size(),
+                                    slot.task->params.sampling.temp, params_base.speculative.draft.p_min,
+                                    params_base.speculative.draft.n_min) ?
+                                    common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch,
+                                                                       slot.spec_draft, slot.spec_dists) :
+                                    common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch,
+                                                                       slot.spec_draft);
                 slot.spec_i_batch.clear();
 
                 GGML_ASSERT(accepted.size() >= 1);

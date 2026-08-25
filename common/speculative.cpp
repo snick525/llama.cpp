@@ -23,6 +23,35 @@
 
 #define SPC_DBG(fmt, ...) LOG_DBG("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_TRC(fmt, ...) LOG_TRC("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
+
+void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & dist, float p_min) {
+    GGML_ASSERT(dist.ids.size() == dist.probs.size());
+
+    float sum = 0.0f;
+    for (float p : dist.probs) {
+        if (p >= p_min) {
+            sum += p;
+        }
+    }
+    GGML_ASSERT(sum > 0.0f);
+
+    for (float & p : dist.probs) {
+        p = p >= p_min ? p / sum : 0.0f;
+    }
+}
+
+bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_type,
+                                              uint32_t                   n_rs_seq,
+                                              size_t                     n_draft,
+                                              size_t                     n_dists,
+                                              float                      temperature,
+                                              float                      p_min,
+                                              int32_t                    n_min) {
+    const bool can_rollback           = seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
+                                        (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_draft <= n_rs_seq);
+    const bool has_unbiased_draft_law = p_min <= 0.0f || n_min <= 1;
+    return can_rollback && has_unbiased_draft_law && temperature > 0.0f && n_dists == n_draft;
+}
 #define SPC_INF(fmt, ...) LOG_INF("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_WRN(fmt, ...) LOG_WRN("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_ERR(fmt, ...) LOG_ERR("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
@@ -1298,6 +1327,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                         predecessor = sample(selector_rng[seq_id]);
                         if (dist.probs[predecessor] < params.p_min) {
                             break;
+                        }
+                        if (params.p_min > 0.0f) {
+                            common_speculative_dist_condition_on_p_min(dist, params.p_min);
                         }
                         result.push_back(dist.ids[predecessor]);
                         dp.dists->push_back(std::move(dist));

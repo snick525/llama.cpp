@@ -10,6 +10,16 @@ struct common_speculative_token_dist {
     std::vector<float> probs;
 };
 
+void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & dist, float p_min);
+
+bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_type,
+                                              uint32_t                   n_rs_seq,
+                                              size_t                     n_draft,
+                                              size_t                     n_dists,
+                                              float                      temperature,
+                                              float                      p_min,
+                                              int32_t                    n_min);
+
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);
 

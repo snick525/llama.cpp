@@ -1,9 +1,9 @@
 #pragma once
 
+#include "common.h"
 #include "llama.h"
 
-#include "common.h"
-
+#include <random>
 #include <string>
 #include <vector>
 
@@ -34,6 +34,22 @@
 
 struct common_sampler;
 struct common_speculative_token_dist;
+
+struct common_speculative_verifier {
+    explicit common_speculative_verifier(uint32_t seed);
+
+    bool sample(const llama_token_data_array &        target,
+                const common_speculative_token_dist & draft_dist,
+                llama_token                           draft,
+                llama_token                           fallback,
+                llama_token &                         result);
+
+    void reset();
+
+  private:
+    uint32_t     seed;
+    std::mt19937 rng;
+};
 
 // llama_sampler API overloads
 

@@ -260,12 +260,11 @@ int main(int argc, char ** argv) {
         // available logits from the batch and sample the next token until we run out of logits or the sampler
         // disagrees with the draft
         //
-        const bool can_rollback =
-            ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
-            (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() <= llama_n_rs_seq(ctx_tgt));
-        auto ids = can_rollback && params.sampling.temp > 0.0f && dists.size() == draft.size()
-            ? common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft, dists)
-            : common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+        auto ids = common_speculative_can_verify_stochastic(ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), draft.size(),
+                                                            dists.size(), params.sampling.temp, params_spec.draft.p_min,
+                                                            params_spec.draft.n_min) ?
+                       common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft, dists) :
+                       common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
 
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
 

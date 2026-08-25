@@ -1,5 +1,7 @@
 #include "ggml.h"
 #include "llama.h"
+#include "sampling.h"
+#include "speculative.h"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -7,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -72,6 +75,190 @@ static llama_token sample_dist(llama_sampler * sampler, const std::vector<float>
     GGML_ASSERT(cur_p.selected >= 0);
     GGML_ASSERT((size_t) cur_p.selected < cur_p.size);
     return cur_p.data[cur_p.selected].id;
+}
+
+static llama_token_data_array make_target_dist(std::vector<llama_token_data> & data) {
+    return { data.data(), data.size(), -1, false };
+}
+
+static void test_maximal_coupling_recovers_target_marginal() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.15f },
+        { 20, 0.0f, 0.35f },
+        { 30, 0.0f, 0.50f },
+    };
+    const auto                          target     = make_target_dist(target_data);
+    const common_speculative_token_dist draft_dist = {
+        { 30,    10,    20    },
+        { 0.50f, 0.40f, 0.10f },
+    };
+
+    common_speculative_verifier        verifier(1234);
+    std::mt19937                       draft_rng(5678);
+    std::discrete_distribution<size_t> sample_draft(draft_dist.probs.begin(), draft_dist.probs.end());
+    int                                counts[3] = {};
+    const int                          n         = 400000;
+    for (int i = 0; i < n; ++i) {
+        const llama_token draft  = draft_dist.ids[sample_draft(draft_rng)];
+        llama_token       result = -1;
+        verifier.sample(target, draft_dist, draft, 99, result);
+        GGML_ASSERT(result != 99);
+        counts[result == 10 ? 0 : result == 20 ? 1 : 2]++;
+    }
+
+    GGML_ASSERT(std::abs(counts[0] / (float) n - 0.15f) < 0.003f);
+    GGML_ASSERT(std::abs(counts[1] / (float) n - 0.35f) < 0.003f);
+    GGML_ASSERT(std::abs(counts[2] / (float) n - 0.50f) < 0.003f);
+}
+
+static void test_maximal_coupling_recovers_target_marginal_with_cutoff() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.50f },
+        { 20, 0.0f, 0.50f },
+        { 30, 0.0f, 0.00f },
+    };
+    const auto                          target                   = make_target_dist(target_data);
+    const common_speculative_token_dist unconditioned_draft_dist = {
+        { 10,    20,    30    },
+        { 0.60f, 0.30f, 0.10f },
+    };
+
+    common_speculative_token_dist conditioned_draft_dist = unconditioned_draft_dist;
+    common_speculative_dist_condition_on_p_min(conditioned_draft_dist, 0.20f);
+    GGML_ASSERT(std::abs(conditioned_draft_dist.probs[0] - 2.0f / 3.0f) < 1e-6f);
+    GGML_ASSERT(std::abs(conditioned_draft_dist.probs[1] - 1.0f / 3.0f) < 1e-6f);
+    GGML_ASSERT(conditioned_draft_dist.probs[2] == 0.0f);
+
+    common_speculative_verifier        verifier(9753);
+    std::mt19937                       draft_rng(8642);
+    std::mt19937                       target_rng(7531);
+    std::discrete_distribution<size_t> sample_draft(unconditioned_draft_dist.probs.begin(),
+                                                    unconditioned_draft_dist.probs.end());
+    std::discrete_distribution<size_t> sample_target({ 0.50f, 0.50f, 0.00f });
+    int                                counts[3] = {};
+    const int                          n         = 400000;
+    for (int i = 0; i < n; ++i) {
+        const size_t draft_idx = sample_draft(draft_rng);
+        llama_token  result    = -1;
+        if (unconditioned_draft_dist.probs[draft_idx] < 0.20f) {
+            result = target_data[sample_target(target_rng)].id;
+        } else {
+            verifier.sample(target, conditioned_draft_dist, unconditioned_draft_dist.ids[draft_idx], 99, result);
+        }
+        GGML_ASSERT(result != 99);
+        counts[result == 10 ? 0 : result == 20 ? 1 : 2]++;
+    }
+
+    GGML_ASSERT(std::abs(counts[0] / (float) n - 0.50f) < 0.003f);
+    GGML_ASSERT(std::abs(counts[1] / (float) n - 0.50f) < 0.003f);
+    GGML_ASSERT(counts[2] == 0);
+}
+
+static void test_maximal_coupling_samples_rejection_residual() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.55f },
+        { 20, 0.0f, 0.30f },
+        { 30, 0.0f, 0.15f },
+    };
+    const auto                          target     = make_target_dist(target_data);
+    const common_speculative_token_dist draft_dist = {
+        { 10,    20,    30    },
+        { 0.15f, 0.10f, 0.75f },
+    };
+
+    common_speculative_verifier verifier(4321);
+    int                         rejected_10 = 0;
+    int                         rejected_20 = 0;
+    const int                   n           = 200000;
+    for (int i = 0; i < n; ++i) {
+        llama_token result   = -1;
+        const bool  accepted = verifier.sample(target, draft_dist, 30, 99, result);
+        if (!accepted) {
+            GGML_ASSERT(result == 10 || result == 20);
+            rejected_10 += result == 10;
+            rejected_20 += result == 20;
+        }
+    }
+
+    const int rejected = rejected_10 + rejected_20;
+    GGML_ASSERT(rejected > 150000);
+    GGML_ASSERT(std::abs(rejected_10 / (float) rejected - 2.0f / 3.0f) < 0.005f);
+}
+
+static void test_maximal_coupling_uses_constrained_target_distribution() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.70f },
+        { 20, 0.0f, 0.30f },
+        { 30, 0.0f, 0.00f },
+    };
+    const auto                          target     = make_target_dist(target_data);
+    const common_speculative_token_dist draft_dist = {
+        { 30 },
+        { 1.0f },
+    };
+
+    common_speculative_verifier verifier(2468);
+    for (int i = 0; i < 1000; ++i) {
+        llama_token result = -1;
+        GGML_ASSERT(!verifier.sample(target, draft_dist, 30, 99, result));
+        GGML_ASSERT(result == 10 || result == 20);
+    }
+}
+
+static void test_maximal_coupling_rng_reset_and_copy() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.20f },
+        { 20, 0.0f, 0.80f },
+    };
+    const auto                          target     = make_target_dist(target_data);
+    const common_speculative_token_dist draft_dist = {
+        { 10,    20    },
+        { 0.80f, 0.20f },
+    };
+
+    common_speculative_verifier verifier(1357);
+    for (int i = 0; i < 7; ++i) {
+        llama_token result = -1;
+        verifier.sample(target, draft_dist, 10, 99, result);
+    }
+    auto                        copy = verifier;
+    common_speculative_verifier assigned(9999);
+    assigned = verifier;
+    for (int i = 0; i < 64; ++i) {
+        llama_token result_a   = -1;
+        llama_token result_b   = -1;
+        llama_token result_c   = -1;
+        const bool  accepted_a = verifier.sample(target, draft_dist, 10, 99, result_a);
+        const bool  accepted_b = copy.sample(target, draft_dist, 10, 99, result_b);
+        const bool  accepted_c = assigned.sample(target, draft_dist, 10, 99, result_c);
+        GGML_ASSERT(accepted_a == accepted_b);
+        GGML_ASSERT(accepted_a == accepted_c);
+        GGML_ASSERT(result_a == result_b);
+        GGML_ASSERT(result_a == result_c);
+    }
+
+    verifier.reset();
+    common_speculative_verifier fresh(1357);
+    for (int i = 0; i < 64; ++i) {
+        llama_token result_a   = -1;
+        llama_token result_b   = -1;
+        const bool  accepted_a = verifier.sample(target, draft_dist, 10, 99, result_a);
+        const bool  accepted_b = fresh.sample(target, draft_dist, 10, 99, result_b);
+        GGML_ASSERT(accepted_a == accepted_b);
+        GGML_ASSERT(result_a == result_b);
+    }
+}
+
+static void test_stochastic_verification_selection_gate() {
+    GGML_ASSERT(common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 4, 0.8f, 0.0f, 2));
+    GGML_ASSERT(common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 4, 4, 4, 0.8f, 0.0f, 2));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 3, 4, 4, 0.8f, 0.0f, 2));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_NO, 0, 4, 4, 0.8f, 0.0f, 2));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_FULL, 0, 4, 4, 0.8f, 0.0f, 2));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 3, 0.8f, 0.0f, 2));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 4, 0.0f, 0.0f, 2));
+    GGML_ASSERT(common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 4, 0.8f, 0.2f, 1));
+    GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 4, 0.8f, 0.2f, 2));
 }
 
 static void test_dist_singleton_rng() {
@@ -338,6 +525,12 @@ int main(void) {
     ggml_time_init();
 
     test_dist_singleton_rng();
+    test_maximal_coupling_recovers_target_marginal();
+    test_maximal_coupling_recovers_target_marginal_with_cutoff();
+    test_maximal_coupling_samples_rejection_residual();
+    test_maximal_coupling_uses_constrained_target_distribution();
+    test_maximal_coupling_rng_reset_and_copy();
+    test_stochastic_verification_selection_gate();
 
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.1f, 0.2f, 0.3f, 0.4f}, 1.0f);
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f);
