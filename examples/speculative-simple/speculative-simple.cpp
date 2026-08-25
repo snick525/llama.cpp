@@ -67,10 +67,10 @@ int main(int argc, char ** argv) {
 
     // check if the context supports partial sequence removal
     const auto ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
-    const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+    const bool always_use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
     const bool use_ckpt_dft = common_context_can_seq_rm(ctx_dft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
-    if (use_ckpt_tgt) {
+    if (always_use_ckpt_tgt) {
         LOG_INF("speculative decoding will use checkpoints (context does not support partial sequence removal)\n");
     }
 
@@ -203,7 +203,7 @@ int main(int argc, char ** argv) {
             // save a checkpoint of the target context before evaluating the draft
             // this allows us to restore the state if partial draft acceptance occurs
             if (!draft.empty()) {
-                if (use_ckpt_tgt) {
+                if (common_speculative_needs_checkpoint(ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), draft.size())) {
                     ckpt.update_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
             }
@@ -218,10 +218,13 @@ int main(int argc, char ** argv) {
             }
         } else {
             // we have a previous (partial) draft to reuse from checkpoint restoration
-            if (use_ckpt_tgt) {
+            if (common_speculative_needs_checkpoint(ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), draft.size())) {
                 GGML_ASSERT(!ckpt.empty());
             }
         }
+
+        const bool use_ckpt_tgt =
+            common_speculative_needs_checkpoint(ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt), draft.size());
 
         // always have a token to evaluate from before - id_last
         common_batch_clear(batch_tgt);
@@ -282,7 +285,7 @@ int main(int argc, char ** argv) {
             {
                 ckpt.load_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
-                llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, ckpt.pos_max + 1, -1);
+                GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, ckpt.pos_max + 1, -1));
             }
 
             if (ctx_dft) {
@@ -340,7 +343,7 @@ int main(int argc, char ** argv) {
         {
             LOG_DBG("clear kv cache from any extra tokens, n_past = %d\n", n_past);
 
-            llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, n_past, -1);
+            GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, n_past, -1));
 
             if (ctx_dft) {
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, n_past, -1);

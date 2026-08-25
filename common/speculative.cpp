@@ -40,6 +40,11 @@ void common_speculative_dist_condition_on_p_min(common_speculative_token_dist & 
     }
 }
 
+bool common_speculative_needs_checkpoint(common_context_seq_rm_type seq_rm_type, uint32_t n_rs_seq, size_t n_draft) {
+    return seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+           (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_draft > n_rs_seq);
+}
+
 bool common_speculative_can_verify_stochastic(common_context_seq_rm_type seq_rm_type,
                                               uint32_t                   n_rs_seq,
                                               size_t                     n_draft,

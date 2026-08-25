@@ -261,6 +261,49 @@ static void test_stochastic_verification_selection_gate() {
     GGML_ASSERT(!common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 4, 4, 0.8f, 0.2f, 2));
 }
 
+static void test_stochastic_verification_rejects_future_conditioned_markov_draft() {
+    std::vector<llama_token_data> target_data = {
+        { 10, 0.0f, 0.50f },
+        { 20, 0.0f, 0.50f },
+    };
+    const auto                          target           = make_target_dist(target_data);
+    const common_speculative_token_dist first_draft_dist = {
+        { 10,    20    },
+        { 0.50f, 0.50f },
+    };
+
+    const bool use_maximal =
+        common_speculative_can_verify_stochastic(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 2, 2, 0.8f, 0.2f, 2);
+    common_speculative_verifier        verifier(1122);
+    std::mt19937                       draft_rng(2233);
+    std::mt19937                       target_rng(3344);
+    std::discrete_distribution<size_t> sample_first({ 0.50f, 0.50f });
+    int                                n_first_token = 0;
+    const int                          n             = 200000;
+    for (int i = 0; i < n; ++i) {
+        const llama_token first_draft          = first_draft_dist.ids[sample_first(draft_rng)];
+        const bool        draft_survives_n_min = first_draft == 10;
+        llama_token       result               = -1;
+        if (draft_survives_n_min && use_maximal) {
+            verifier.sample(target, first_draft_dist, first_draft, 99, result);
+        } else {
+            result = target_data[sample_first(target_rng)].id;
+        }
+        n_first_token += result == 10;
+    }
+
+    GGML_ASSERT(!use_maximal);
+    GGML_ASSERT(std::abs(n_first_token / (float) n - 0.50f) < 0.004f);
+}
+
+static void test_speculative_checkpoint_selection() {
+    GGML_ASSERT(common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_FULL, 0, 1));
+    GGML_ASSERT(common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 3, 4));
+    GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_RS, 3, 3));
+    GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_PART, 0, 8));
+    GGML_ASSERT(!common_speculative_needs_checkpoint(COMMON_CONTEXT_SEQ_RM_TYPE_NO, 0, 8));
+}
+
 static void test_dist_singleton_rng() {
     llama_sampler * singleton = llama_sampler_init_dist(4242);
     llama_sampler * control   = llama_sampler_init_dist(4242);
@@ -531,6 +574,8 @@ int main(void) {
     test_maximal_coupling_uses_constrained_target_distribution();
     test_maximal_coupling_rng_reset_and_copy();
     test_stochastic_verification_selection_gate();
+    test_stochastic_verification_rejects_future_conditioned_markov_draft();
+    test_speculative_checkpoint_selection();
 
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.1f, 0.2f, 0.3f, 0.4f}, 1.0f);
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f);
